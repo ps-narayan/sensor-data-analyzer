@@ -1,4 +1,4 @@
-"""Analyze ADC readings and create a Markdown report and SVG temperature plot."""
+"""Turn ADC samples into voltage, TMP36 temperature, and a small report."""
 from __future__ import annotations
 
 import argparse
@@ -6,6 +6,9 @@ import csv
 import math
 from dataclasses import dataclass
 from pathlib import Path
+
+TMP36_ZERO_V = 0.5
+TMP36_C_PER_V = 100.0
 
 
 @dataclass(frozen=True)
@@ -17,7 +20,7 @@ class Reading:
 
 
 def load_csv(path: Path, adc_max: int, vref: float) -> list[Reading]:
-    """Read and validate a time/count CSV, then apply the TMP36 model."""
+    """Read time/count samples and convert them with the TMP36 transfer curve."""
     if adc_max <= 0:
         raise ValueError("ADC maximum count must be greater than zero.")
     if not math.isfinite(vref) or vref <= 0:
@@ -46,8 +49,11 @@ def load_csv(path: Path, adc_max: int, vref: float) -> list[Reading]:
                 adc_count = int(raw_count)
                 if not 0 <= adc_count <= adc_max:
                     raise ValueError(f"Line {line_number}: adc_count must be between 0 and {adc_max}.")
+
                 voltage = adc_count / adc_max * vref
-                temperature = (voltage - 0.5) * 100.0
+                temperature = (voltage - TMP36_ZERO_V) * TMP36_C_PER_V
+                if not math.isfinite(voltage) or not math.isfinite(temperature):
+                    raise ValueError(f"Line {line_number}: conversion produced a non-finite value.")
                 readings.append(Reading(time_s, adc_count, voltage, temperature))
                 previous_time = time_s
     except OSError as error:
@@ -59,9 +65,12 @@ def load_csv(path: Path, adc_max: int, vref: float) -> list[Reading]:
 
 
 def summarize(readings: list[Reading], high_temp_c: float | None = None) -> dict[str, float | int | None]:
-    """Calculate voltage and temperature statistics."""
+    """Summarize the readings, optionally counting values over a threshold."""
     if not readings:
         raise ValueError("At least one reading is required.")
+    if high_temp_c is not None and not math.isfinite(high_temp_c):
+        raise ValueError("Temperature threshold must be finite.")
+
     voltages = [reading.voltage_v for reading in readings]
     temperatures = [reading.temperature_c for reading in readings]
     return {
@@ -74,7 +83,9 @@ def summarize(readings: list[Reading], high_temp_c: float | None = None) -> dict
         "temperature_average": sum(temperatures) / len(temperatures),
         "temperature_max": max(temperatures),
         "high_temp_count": (
-            sum(value > high_temp_c for value in temperatures) if high_temp_c is not None else None
+            sum(temperature > high_temp_c for temperature in temperatures)
+            if high_temp_c is not None
+            else None
         ),
     }
 
@@ -82,13 +93,15 @@ def summarize(readings: list[Reading], high_temp_c: float | None = None) -> dict
 def write_report(
     summary: dict[str, float | int | None], output_path: Path, high_temp_c: float | None
 ) -> None:
-    """Write a shareable Markdown summary next to the generated chart."""
-    def fmt(key: str) -> str:
-        return f"{float(summary[key]):.3f}"
+    """Write a Markdown summary beside the chart."""
+    def fmt(key: str, digits: int = 3) -> str:
+        return f"{float(summary[key]):.{digits}f}"
 
     alert = ""
     if high_temp_c is not None:
-        alert = f"\n- Readings above **{high_temp_c:.2f} °C**: **{summary['high_temp_count']}**\n"
+        count = int(summary["high_temp_count"] or 0)
+        alert = f"\n- Readings above **{high_temp_c:.2f} °C**: {count}\n"
+
     content = f"""# Sensor Data Report
 
 - Readings: **{summary['count']}**
@@ -110,7 +123,10 @@ This report uses the TMP36 model. Sensor tolerances and ADC calibration can affe
 
 
 def write_temperature_chart(readings: list[Reading], output_path: Path) -> None:
-    """Create a dependency-free SVG chart of temperature versus time."""
+    """Draw a temperature-over-time chart as a standalone SVG file."""
+    if not readings:
+        raise ValueError("At least one reading is needed to draw a chart.")
+
     width, height = 900, 500
     left, right, top, bottom = 82, 35, 42, 72
     plot_width, plot_height = width - left - right, height - top - bottom
@@ -132,7 +148,7 @@ def write_temperature_chart(readings: list[Reading], output_path: Path) -> None:
         return top + (y_max - value) / (y_max - y_min) * plot_height
 
     points = " ".join(
-        f"{x_pixel(item.time_s):.1f},{y_pixel(item.temperature_c):.1f}" for item in readings
+        f"{x_pixel(reading.time_s):.1f},{y_pixel(reading.temperature_c):.1f}" for reading in readings
     )
     grid: list[str] = []
     for index in range(5):
@@ -154,7 +170,7 @@ def write_temperature_chart(readings: list[Reading], output_path: Path) -> None:
 
     svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-labelledby="title desc">
 <title id="title">TMP36 temperature over time</title>
-<desc id="desc">Line chart of {len(readings)} readings from {times[0]:.2f} to {times[-1]:.2f} seconds.</desc>
+<desc id="desc">Line chart of {len(readings)} temperature readings from {times[0]:.2f} to {times[-1]:.2f} seconds.</desc>
 <style>
   text {{ font-family: Arial, sans-serif; fill: #243247; }}
   .title {{ font-size: 22px; font-weight: 700; }} .tick {{ font-size: 12px; fill: #56657a; }}
@@ -176,7 +192,9 @@ def write_temperature_chart(readings: list[Reading], output_path: Path) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Convert ADC CSV readings into voltage and TMP36 temperature.")
+    parser = argparse.ArgumentParser(
+        description="Convert ADC counts into voltage and TMP36 temperature."
+    )
     parser.add_argument("csv_file", type=Path, help="CSV with time_s and adc_count columns")
     parser.add_argument("--vref", type=float, default=3.3, help="ADC reference voltage (default: 3.3 V)")
     parser.add_argument("--adc-max", type=int, default=4095, help="maximum ADC count (default: 4095 for 12-bit)")
