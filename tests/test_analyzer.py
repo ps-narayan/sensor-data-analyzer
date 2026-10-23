@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from analyze import load_csv, summarize, write_temperature_chart
+from analyze import load_csv, summarize, write_report, write_temperature_chart
 
 
 class AnalyzerTests(unittest.TestCase):
@@ -47,6 +47,24 @@ class AnalyzerTests(unittest.TestCase):
         chart = chart_path.read_text(encoding="utf-8")
         self.assertIn("<svg", chart)
         self.assertIn("polyline", chart)
+
+    def test_report_includes_summary_and_threshold_count(self):
+        self.csv_path.write_text("time_s,adc_count\n0,870\n1,1059\n", encoding="utf-8")
+        readings = load_csv(self.csv_path, adc_max=4095, vref=3.3)
+        summary = summarize(readings, high_temp_c=30)
+        report_path = Path(self.temp_dir.name) / "report.md"
+
+        write_report(summary, report_path, high_temp_c=30)
+
+        report = report_path.read_text(encoding="utf-8")
+        self.assertIn("Readings: **2**", report)
+        self.assertIn("Readings above **30.00 °C**: 1", report)
+        self.assertIn("temperature_chart.svg", report)
+
+    def test_empty_chart_input_is_rejected(self):
+        chart_path = Path(self.temp_dir.name) / "empty.svg"
+        with self.assertRaisesRegex(ValueError, "At least one reading"):
+            write_temperature_chart([], chart_path)
 
 
 if __name__ == "__main__":
