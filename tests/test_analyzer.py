@@ -39,6 +39,17 @@ class AnalyzerTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_csv(self.csv_path, adc_max=4095, vref=3.3)
 
+    def test_non_finite_temperature_conversion_is_rejected(self):
+        self.csv_path.write_text("time_s,adc_count\n0,1\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "non-finite value"):
+            load_csv(self.csv_path, adc_max=1, vref=1e308)
+
+    def test_non_finite_temperature_threshold_is_rejected(self):
+        self.csv_path.write_text("time_s,adc_count\n0,870\n", encoding="utf-8")
+        readings = load_csv(self.csv_path, adc_max=4095, vref=3.3)
+        with self.assertRaisesRegex(ValueError, "threshold must be finite"):
+            summarize(readings, high_temp_c=float("inf"))
+
     def test_chart_is_created_for_constant_time_and_temperature(self):
         self.csv_path.write_text("time_s,adc_count\n0,1000\n0,1000\n", encoding="utf-8")
         readings = load_csv(self.csv_path, adc_max=4095, vref=3.3)
